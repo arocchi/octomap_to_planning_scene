@@ -25,6 +25,9 @@
 #include <rosbag/view.h>
 #include <eigen_conversions/eigen_kdl.h>
 #include <eigen_conversions/eigen_msg.h>
+#include <octomap_msgs/conversions.h>
+#include <octomap_ros/conversions.h>
+#include <tf_conversions/tf_eigen.h>
 
 #include <ros/ros.h>
 #include <ros/time.h>
@@ -37,24 +40,139 @@ Eigen::Affine3d pose;
 Eigen::Affine3d offset;
 octomap_msgs::OctomapWithPose octomapMsgWithPose;
 boost::shared_ptr<iDynUtils> idynutils;
-std::string frame_id;
 ros::Publisher planning_scene_publisher;
+
+octomath::Pose6D poseEigenToOctomap(Eigen::Affine3d transform)
+{
+        Eigen::Quaterniond qd(transform.rotation());
+        octomath::Quaternion q(qd.w(), qd.x(), qd.y(), qd.z());
+        octomath::Vector3 v(transform.translation().x(),
+                            transform.translation().y(),
+                            transform.translation().z());
+        octomath::Pose6D t(v,q);
+        return t;
+        
+        /* can be done also as:
+           tf::Pose tf;
+           tf::poseEigenToTF(transform, tf)
+           return tf::poseTfToOctomap(tf);
+        */
+}
+
+void filterOctomap(Eigen::Affine3d transform, 
+                   octomap_msgs::Octomap& octomap_msg,
+                   octomath::Vector3 min, octomath::Vector3 max)
+{
+    octomap::AbstractOcTree* tree = octomap_msgs::msgToMap(octomap_msg);
+    octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(tree);
+    octomap::OcTree* newOctree = new octomap::OcTree(octomap_msg.resolution);
+
+    octomath::Pose6D t = poseEigenToOctomap(pose*offset);
+        
+    std::cout << "starting octmap filtering ...";
+     for(octomap::OcTree::leaf_iterator it = octree->begin_leafs(),
+       end=octree->end_leafs(); it!= end; ++it)
+    {
+        //manipulate node, e.g.:
+        octomath::Vector3 coord = it.getCoordinate();
+        octomath::Vector3 newCoord = t.transform(coord);
+        if(newCoord.x() > min.x() &&
+           newCoord.x() < max.x() &&
+           newCoord.y() > min.y() &&
+           newCoord.y() < max.y() &&
+           newCoord.z() > min.z() &&
+           newCoord.z() < max.z())
+            newOctree->updateNode(coord,
+                    it->getValue());
+    }
+
+    std::cout << "done" << std::endl;
+
+    octomap_msgs::fullMapToMsg(*newOctree, octomap_msg);
+    
+    delete(newOctree);
+    delete(octree);
+}
+// first transform, then filter (NOTE: we should do the same also on the original octomap
+void transformAndFilterOctomap(Eigen::Affine3d transform, 
+                               octomap_msgs::Octomap& octomap_msg,
+                               double min_x_val, double max_x_val,
+                               double min_y_val, double max_y_val,
+                               double min_z_val, double max_z_val)
+{
+    
+    octomap::AbstractOcTree* tree = octomap_msgs::msgToMap(octomap_msg);
+    octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(tree);
+    
+    octomap::OcTree* newOctree = new octomap::OcTree(octomap_msg.resolution);
+    
+    octomath::Pose6D t = poseEigenToOctomap(transform);
+    
+    /*octree->toMaxLikelihood();
+    octree->prune();
+    octree->expand();*/
+    std::cout << "starting octmap transform ...";
+     for(octomap::OcTree::leaf_iterator it = octree->begin_leafs(),
+       end=octree->end_leafs(); it!= end; ++it)
+    {
+        //manipulate node, e.g.:
+        octomath::Vector3 newCoordinate = t.transform(it.getCoordinate());
+        if(newCoordinate.x() > min_x_val &&
+           newCoordinate.x() < max_x_val &&
+           newCoordinate.y() > min_y_val &&
+           newCoordinate.y() < max_y_val &&
+           newCoordinate.z() > min_z_val &&
+           newCoordinate.z() < max_z_val)
+        newOctree->updateNode(newCoordinate,
+                              it->getValue());
+        
+    }
+    /*
+    newOctree->toMaxLikelihood();
+    newOctree->prune();
+    */
+    std::cout << "done" << std::endl;
+
+
+    octomap_msgs::fullMapToMsg(*newOctree, octomap_msg);
+    
+    delete(newOctree);
+    delete(octree);
+}
 
 void updateOctomapAndPublish()
 {
     tf::poseEigenToMsg(
         pose*offset,
         octomapMsgWithPose.origin);
-    idynutils->updateOccupancyMap(octomapMsgWithPose);
-    planning_scene_publisher.publish(
-        idynutils->getPlanningSceneMsg());
+    std::cout << (pose*offset).affine() << std::endl;
+
+    octomath::Pose6D t = poseEigenToOctomap(pose*offset);
+    
+    double inf = std::numeric_limits<double>::infinity();
+    octomath::Vector3 min(0.5, -0.5, -inf);
+    octomath::Vector3 max(1.5,  0.5,  inf);
+    
+    octomap_msgs::OctomapWithPose octomapMsgWithPoseFiltered = octomapMsgWithPose;
+    filterOctomap(pose*offset, octomapMsgWithPoseFiltered.octomap, 
+                  min, max);
+    idynutils->updateOccupancyMap(octomapMsgWithPoseFiltered);
+    
+    // since the origin doesn't seem to make any difference, we transform the octomap
+    moveit_msgs::PlanningScene scene_msg = idynutils->getPlanningSceneMsg();
+    
+    transformAndFilterOctomap(pose*offset, scene_msg.world.octomap.octomap, 
+                              -inf, inf,
+                              -inf, inf,
+                              -inf, inf);
+    planning_scene_publisher.publish(scene_msg);
 }
 
 void callback(const geometry_msgs::PoseConstPtr& msg)
 {
     tf::poseMsgToEigen(*msg, offset);
+    std::cout << "Pose received:" << std::endl;
     updateOctomapAndPublish();
-    std::cout << "Pose received" << std::endl;
 }
 
 yarp::sig::Vector getGoodInitialPositionBigman(iDynUtils& idynutils) {
@@ -117,15 +235,13 @@ int main(int argc, char** argv)
 
     octomapMsgWithPose.octomap = *octomapMsg;
     octomapMsgWithPose.header = octomapMsg->header;
-    frame_id = octomapMsg->header.frame_id;
 
     idynutils.reset(new iDynUtils("bigman", urdf_file, srdf_file));
     yarp::sig::Vector q = getGoodInitialPositionBigman(*idynutils);
     idynutils->updateiDyn3Model(q, true);
     idynutils->updateRobotState();
 
-    Eigen::Affine3d w_T_octomap = idynutils->moveit_planning_scene->getFrameTransform(frame_id);
-    pose = w_T_octomap;
+    pose.setIdentity();
 
     offset.setIdentity();
     updateOctomapAndPublish();
