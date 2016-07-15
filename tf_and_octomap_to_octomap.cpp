@@ -48,14 +48,10 @@ octomath::Vector3 max(inf, inf, inf);
 
 void callbackShape(const shape_msgs::SolidPrimitiveConstPtr& msg)
 {
-    if(msg->type == shape_msgs::SolidPrimitive::BOX)
+    if(msg->type == 0 && msg->dimensions.size() == 6) // custom msg
     {
-        min.x() = -msg->dimensions[shape_msgs::SolidPrimitive::BOX_X];
-        max.x() =  msg->dimensions[shape_msgs::SolidPrimitive::BOX_X];
-        min.y() = -msg->dimensions[shape_msgs::SolidPrimitive::BOX_Y];
-        max.y() =  msg->dimensions[shape_msgs::SolidPrimitive::BOX_Y];
-        min.z() = -msg->dimensions[shape_msgs::SolidPrimitive::BOX_Z];
-        max.z() =  msg->dimensions[shape_msgs::SolidPrimitive::BOX_Z];
+        min.x() = msg->dimensions[0]; min.y() = msg->dimensions[1]; min.z() = msg->dimensions[2];
+        max.x() = msg->dimensions[3]; max.y() = msg->dimensions[4]; max.z() = msg->dimensions[5];
         std::cout << "Filtering octomap from:\n"
                   << min << "\nto\n" << max << std::endl;
     } else std::cout << "Unknown shape received" << std::endl;
@@ -92,7 +88,8 @@ yarp::sig::Vector getGoodInitialPositionBigman(iDynUtils& idynutils) {
 bool loadBag(std::string bag_file,
              octomap_msgs::Octomap::ConstPtr& octomapMsg,
              tf2_msgs::TFMessage::ConstPtr& tfMsg,
-             geometry_msgs::TransformStamped& ts)
+             geometry_msgs::TransformStamped& ts,
+             bool tf_optional = true)
 {
     rosbag::Bag bag;
     bag.open(std::string(PROJ_DATA_DIR) + bag_file, rosbag::bagmode::Read);
@@ -141,27 +138,36 @@ bool loadBag(std::string bag_file,
                 {
                     tf_found = true;
                     ts = tfMsg->transforms[i];
+                    std::cout << "Found tf from "
+                              << tfMsg->transforms[i].header.frame_id
+                              << " to "
+                              << tfMsg->transforms[i].child_frame_id << std::endl;
                 }
             }
         }
 
-        if(octomap_loaded && tf_loaded && tf_found)
+        if(octomap_loaded && (tf_loaded && tf_found))
             break;
     }
 
-    if(!(octomap_loaded && tf_loaded))
+    if(!(octomap_loaded))
     {
-        std::cout << "could not find tf and octomap msg in the specified bag file" << std::endl;
+        std::cout << "could not find octomap msg";
+        if(!tf_found && !tf_optional)
+            std::cout << " and tf ";
+        std::cout << "in the specified bag file" << std::endl;
+        return false;
+    } else if(!tf_found && !tf_optional) {
+            std::cout << "could not find tf in the specified bag file" << std::endl;
         return false;
     }
-
 
     if(octomapMsg != NULL)
         std::cout << "octomap loaded succesfully" << std::endl;
     else return false;
     if(tfMsg != NULL)
         std::cout << "tf loaded succesfully" << std::endl;
-    else return false;
+    else if(!tf_optional) return false;
     bag.close();
 
     return true;
@@ -206,10 +212,13 @@ int main(int argc, char** argv)
 
     if(loadBag(argv[1], octomapMsg, tfMsg, ts))
     {
-        geometry_msgs::Transform t = ts.transform;
-        pose_to = octomapMsg->header.frame_id;
-        pose_from = ts.header.frame_id;
-        tf::transformMsgToEigen(t, from_T_to);
+        if(tfMsg != NULL)
+        {
+            geometry_msgs::Transform t = ts.transform;
+            pose_to = octomapMsg->header.frame_id;
+            pose_from = ts.header.frame_id;
+            tf::transformMsgToEigen(t, from_T_to);
+        }
     } else return -1;
 
 
@@ -218,10 +227,15 @@ int main(int argc, char** argv)
     idynutils->updateiDyn3Model(q, true);
     idynutils->updateRobotState();
 
-    w_T_from = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_from);
-    w_T_to2 = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_to);
-    from_T_to2 = w_T_from.inverse() * w_T_to2;
-    to2_T_to = from_T_to2.inverse() * from_T_to;
+    to2_T_to.setIdentity();
+    if(tfMsg != NULL)
+    {
+        w_T_from = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_from);
+        w_T_to2 = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_to);
+        from_T_to2 = w_T_from.inverse() * w_T_to2;
+        to2_T_to = from_T_to2.inverse() * from_T_to;
+    }
+
     geometry_msgs::Pose to2_T_to_pose; tf::poseEigenToMsg(to2_T_to, to2_T_to_pose);
 
 
@@ -245,6 +259,7 @@ int main(int argc, char** argv)
             idynutils->updateOccupancyMap(w_Octomap);
             octomap_msgs::Octomap octomap_msg = idynutils->getPlanningSceneMsg().world.octomap.octomap;
             octomap_msg.header.frame_id = idynutils->getPlanningSceneMsg().world.octomap.header.frame_id;
+            if(octomap_msg.header.frame_id == "") octomap_msg.header.frame_id = "/world";
             octomap_publisher.publish(idynutils->getPlanningSceneMsg().world.octomap.octomap);
             planning_scene_publisher.publish(idynutils->getPlanningSceneMsg());
             display_robot_state_publisher.publish(idynutils->getDisplayRobotStateMsg());
