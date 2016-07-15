@@ -30,6 +30,7 @@
 #include <tf_conversions/tf_eigen.h>
 #include <tf2_msgs/TFMessage.h>
 #include <shape_msgs/SolidPrimitive.h>
+#include <tf/transform_listener.h>
 
 #include <ros/ros.h>
 #include <ros/time.h>
@@ -38,18 +39,31 @@
 #include <iostream>
 #include <cstdlib>
 
-Eigen::Affine3d offset;
+Eigen::Affine3d to2_T_to, offset;
 boost::shared_ptr<iDynUtils> idynutils;
 octomap_msgs::OctomapWithPose w_Octomap;
+bool octomap_received = false;
+std::string pose_from, pose_to;
 
 double inf = std::numeric_limits<double>::infinity();
 octomath::Vector3 min(-inf, -inf, -inf);
 octomath::Vector3 max(inf, inf, inf);
 
+void callbackOctomap(const octomap_msgs::OctomapConstPtr& msg)
+{
+    std::cout << "**** octomap received" << std::endl;
+    w_Octomap.octomap = *msg;
+    w_Octomap.header.frame_id = msg->header.frame_id;
+    octomap_received = true;
+    pose_to = msg->header.frame_id;
+    pose_from = "l_sole";
+}
+
 void callbackShape(const shape_msgs::SolidPrimitiveConstPtr& msg)
 {
     if(msg->type == 0 && msg->dimensions.size() == 6) // custom msg
     {
+        std::cout << "*** shape received" << std::endl;
         min.x() = msg->dimensions[0]; min.y() = msg->dimensions[1]; min.z() = msg->dimensions[2];
         max.x() = msg->dimensions[3]; max.y() = msg->dimensions[4]; max.z() = msg->dimensions[5];
         std::cout << "Filtering octomap from:\n"
@@ -60,7 +74,7 @@ void callbackShape(const shape_msgs::SolidPrimitiveConstPtr& msg)
 void callbackPose(const geometry_msgs::PoseConstPtr& msg)
 {
     tf::poseMsgToEigen(*msg, offset);
-    std::cout << "Pose received:\n" << offset.affine() << std::endl;
+    std::cout << "*** pose received\n" << offset.affine() << std::endl;
 }
 
 yarp::sig::Vector getGoodInitialPositionBigman(iDynUtils& idynutils) {
@@ -85,104 +99,9 @@ yarp::sig::Vector getGoodInitialPositionBigman(iDynUtils& idynutils) {
     return q;
 }
 
-bool loadBag(std::string bag_file,
-             octomap_msgs::Octomap::ConstPtr& octomapMsg,
-             tf2_msgs::TFMessage::ConstPtr& tfMsg,
-             geometry_msgs::TransformStamped& ts,
-             bool tf_optional = true)
-{
-    rosbag::Bag bag;
-    bag.open(std::string(PROJ_DATA_DIR) + bag_file, rosbag::bagmode::Read);
-
-    std::vector<std::string> topics;
-    topics.push_back(std::string("/octomap_binary"));
-    topics.push_back(std::string("/tf"));
-    rosbag::View view(bag, rosbag::TopicQuery(topics));
-    bool octomap_loaded = false;
-    bool tf_loaded = false;
-    bool tf_found = false;
-
-    for(rosbag::View::const_iterator i_m = view.begin(); i_m != view.end(); ++i_m)
-    {
-        std::cout << ".";
-        rosbag::MessageInstance m = *i_m;
-        if(m.getTopic() == "/octomap_binary")
-        {
-            std::cout << "..reading octomap binary..";
-            octomap_msgs::Octomap::ConstPtr msgOctoMap = m.instantiate<octomap_msgs::Octomap>();
-            if(msgOctoMap != NULL)
-            {
-                std::cout << "octomap updated" << std::endl;
-                octomap_loaded = true;
-                octomapMsg = msgOctoMap;
-            }
-        }
-
-        if(m.getTopic() == "/tf")
-        {
-            std::cout << "..reading tf..";
-            tf2_msgs::TFMessage::ConstPtr msgTf = m.instantiate<tf2_msgs::TFMessage>();
-            if(msgTf != NULL)
-            {
-                std::cout << "tf updated" << std::endl;
-                tf_loaded = true;
-                tfMsg = msgTf;
-            }
-        }
-
-        if(octomap_loaded && tf_loaded)
-        {
-            for (unsigned int i = 0; i < tfMsg->transforms.size(); ++i)
-            {
-                if (tfMsg->transforms[i].child_frame_id == octomapMsg->header.frame_id)
-                {
-                    tf_found = true;
-                    ts = tfMsg->transforms[i];
-                    std::cout << "Found tf from "
-                              << tfMsg->transforms[i].header.frame_id
-                              << " to "
-                              << tfMsg->transforms[i].child_frame_id << std::endl;
-                }
-            }
-        }
-
-        if(octomap_loaded && (tf_loaded && tf_found))
-            break;
-    }
-
-    if(!(octomap_loaded))
-    {
-        std::cout << "could not find octomap msg";
-        if(!tf_found && !tf_optional)
-            std::cout << " and tf ";
-        std::cout << "in the specified bag file" << std::endl;
-        return false;
-    } else if(!tf_found && !tf_optional) {
-            std::cout << "could not find tf in the specified bag file" << std::endl;
-        return false;
-    }
-
-    if(octomapMsg != NULL)
-        std::cout << "octomap loaded succesfully" << std::endl;
-    else return false;
-    if(tfMsg != NULL)
-        std::cout << "tf loaded succesfully" << std::endl;
-    else if(!tf_optional) return false;
-    bag.close();
-
-    return true;
-}
-
 int main(int argc, char** argv)
 {
-    if(argc != 2)
-    {
-        std::cout << "usage: tf_and_octomap_to_octomap rosbag.bag" << std::endl;
-        std::cout << "notice that rosbag.bag should lie in the data/ folder" << std::endl;
-        return 0;
-    }
-
-    ros::init(argc, argv, "octomap_publisher");
+    ros::init(argc, argv, "tf_and_octomap_to_octomap");
     bool ros_is_running = ros::master::check();
     boost::shared_ptr<ros::NodeHandle> node_handle;
     if(ros_is_running)
@@ -195,32 +114,18 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    ros::Publisher  octomap_publisher = node_handle->advertise<octomap_msgs::Octomap>("/octomap_binary", 1);
+    ros::Publisher  octomap_publisher = node_handle->advertise<octomap_msgs::Octomap>("/octomap_binary_filtered", 1);
     ros::Publisher  planning_scene_publisher = node_handle->advertise<moveit_msgs::PlanningScene>("/planning_scene", 1);
     ros::Publisher  display_robot_state_publisher = node_handle->advertise<moveit_msgs::DisplayRobotState>("/display_robot_state", 1);
+    tf::TransformListener listener;
+    ros::Subscriber octomap_subscriber = node_handle->subscribe("/octomap_binary",  1, callbackOctomap);
     ros::Subscriber pose_subscriber =  node_handle->subscribe("/poser",  1, callbackPose);
     ros::Subscriber shape_subscriber = node_handle->subscribe("/shaper", 1, callbackShape);
     std::string urdf_file = std::string(PROJ_DATA_DIR) + "bigman/bigman.urdf";
     std::string srdf_file = std::string(PROJ_DATA_DIR) + "bigman/bigman.srdf";
-    std::cout << "OPENING ROS BAG:\n" + std::string(PROJ_DATA_DIR) + argv[1] + "\n..";
 
-    octomap_msgs::Octomap::ConstPtr octomapMsg;
-    tf2_msgs::TFMessage::ConstPtr tfMsg;
-    geometry_msgs::TransformStamped ts;
-    Eigen::Affine3d from_T_to, from_T_to2, w_T_from, w_T_to2, to2_T_to;
-    std::string pose_from, pose_to;
-
-    if(loadBag(argv[1], octomapMsg, tfMsg, ts))
-    {
-        if(tfMsg != NULL)
-        {
-            geometry_msgs::Transform t = ts.transform;
-            pose_to = octomapMsg->header.frame_id;
-            pose_from = ts.header.frame_id;
-            tf::transformMsgToEigen(t, from_T_to);
-        }
-    } else return -1;
-
+    tf::StampedTransform st;
+    Eigen::Affine3d from_T_to, from_T_to2, w_T_from, w_T_to2;
 
     idynutils.reset(new iDynUtils("bigman", urdf_file, srdf_file));
     yarp::sig::Vector q = getGoodInitialPositionBigman(*idynutils);
@@ -228,39 +133,43 @@ int main(int argc, char** argv)
     idynutils->updateRobotState();
 
     to2_T_to.setIdentity();
-    if(tfMsg != NULL)
-    {
-        w_T_from = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_from);
-        w_T_to2 = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_to);
-        from_T_to2 = w_T_from.inverse() * w_T_to2;
-        to2_T_to = from_T_to2.inverse() * from_T_to;
-    }
-
-    geometry_msgs::Pose to2_T_to_pose; tf::poseEigenToMsg(to2_T_to, to2_T_to_pose);
-
-
-    w_Octomap.octomap = *octomapMsg;
-    w_Octomap.header.frame_id = octomapMsg->header.frame_id;
-    w_Octomap.origin = to2_T_to_pose;
     offset.setIdentity();
-
-    std::cout << " DONE" << std::endl;
-    std::cout.flush();
 
     ros::Rate r(10);
     while(!ros::isShuttingDown())
     {
         ros::spinOnce();
 
+        if(octomap_received)
+        {
+            try
+            {
+                listener.waitForTransform(pose_to, pose_from, ros::Time(0), ros::Duration(1.0) );
+                listener.lookupTransform(pose_to, pose_from,
+                                         ros::Time(0), st);
+                std::cout << "*** transform received\nfrom " << pose_from << " to " << pose_to << std::endl;
+                w_T_from = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_from);
+                w_T_to2 = idynutils->moveit_planning_scene->getCurrentState().getFrameTransform(pose_to);
+                from_T_to2 = w_T_from.inverse() * w_T_to2;
+                to2_T_to = from_T_to2.inverse() * from_T_to;
+            } catch(...)  {
+                std::cout << "xxx could not read transform from " << pose_from << " to " << pose_to << std::endl;
+            }
+
+        }
+
+        if(octomap_received)
         // void updateAndPublish()
         {
-            Eigen::Affine3d origin; tf::poseMsgToEigen(w_Octomap.origin, origin);
-            tf::poseEigenToMsg(origin*offset, w_Octomap.origin);
+            tf::poseEigenToMsg(to2_T_to*offset, w_Octomap.origin);
             idynutils->updateOccupancyMap(w_Octomap);
             octomap_msgs::Octomap octomap_msg = idynutils->getPlanningSceneMsg().world.octomap.octomap;
             octomap_msg.header.frame_id = idynutils->getPlanningSceneMsg().world.octomap.header.frame_id;
-            if(octomap_msg.header.frame_id == "") octomap_msg.header.frame_id = "/world";
-            octomap_publisher.publish(idynutils->getPlanningSceneMsg().world.octomap.octomap);
+            std::cout << "old octomap had frame_id="
+                      << w_Octomap.header.frame_id
+                      <<", publishing new octomap with frame_id="
+                     << octomap_msg.header.frame_id << std::endl;
+            octomap_publisher.publish(octomap_msg);
             planning_scene_publisher.publish(idynutils->getPlanningSceneMsg());
             display_robot_state_publisher.publish(idynutils->getDisplayRobotStateMsg());
         }
