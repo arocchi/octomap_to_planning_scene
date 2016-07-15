@@ -135,7 +135,7 @@ int main(int argc, char** argv)
     to2_T_to.setIdentity();
     offset.setIdentity();
 
-    ros::Rate r(10);
+    ros::Rate r(100);
     while(!ros::isShuttingDown())
     {
         ros::spinOnce();
@@ -144,7 +144,7 @@ int main(int argc, char** argv)
         {
             try
             {
-                listener.waitForTransform(pose_to, pose_from, ros::Time(0), ros::Duration(1.0) );
+                listener.waitForTransform(pose_to, pose_from, ros::Time(0), ros::Duration(0.1) );
                 listener.lookupTransform(pose_to, pose_from,
                                          ros::Time(0), st);
                 std::cout << "*** transform received\nfrom " << pose_from << " to " << pose_to << std::endl;
@@ -162,6 +162,7 @@ int main(int argc, char** argv)
         // void updateAndPublish()
         {
             tf::poseEigenToMsg(to2_T_to*offset, w_Octomap.origin);
+            octomap_utils::filterOctomap(w_Octomap.octomap, min, max, to2_T_to*offset);
             idynutils->updateOccupancyMap(w_Octomap);
             octomap_msgs::Octomap octomap_msg = idynutils->getPlanningSceneMsg().world.octomap.octomap;
             octomap_msg.header.frame_id = idynutils->getPlanningSceneMsg().world.octomap.header.frame_id;

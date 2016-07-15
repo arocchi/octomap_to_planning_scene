@@ -22,3 +22,5 @@ TARGET_LINK_LIBRARIES(tf_and_octomap_to_octomap ${iDynTree_LIBRARIES}
 
 add_definitions(-DPROJ_DATA_DIR="${CMAKE_CURRENT_BINARY_DIR}/data/")
 
+add_custom_target(copy_data_files ALL
+                  ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/data" "${CMAKE_CURRENT_BINARY_DIR}/data")

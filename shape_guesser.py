@@ -19,7 +19,7 @@ if __name__ == "__main__":
         (x_max, y_max, z_max) = (float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6]))
     
     rospy.init_node("shape_guesser")
-    pub = rospy.Publisher('shaper', geometry_msgs.msg.Pose, queue_size=1)
+    pub = rospy.Publisher('shaper', shape_msgs.msg.SolidPrimitive, queue_size=1)
     msg = shape_msgs.msg.SolidPrimitive()
     msg.dimensions = [x_min, y_min, z_min, x_max, y_max, z_max];
 
